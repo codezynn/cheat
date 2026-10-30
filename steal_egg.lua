@@ -1,7 +1,6 @@
 --[[
     Steal an Egg | by zynn
     works: Arceus X, Delta, Fluxus, Hydrogen, Solara, Codex, Synapse
-    bypass: anti-kick, speed obfuscation, remote spoof, walk humanoid mask
 ]]
 
 local Players          = game:GetService("Players")
@@ -20,13 +19,13 @@ local function safeCall(fn,...) local ok,r=pcall(fn,...) return ok and r or nil 
 
 -- ── config ────────────────────────────────────────────────────────────────────
 local CFG = {
-    autoSteal  = false,
+    autoSteal  = true,
     stealDelay = 0.15,
     stealRadius= 40,
-    speed      = 16,
-    infJump    = false,
+    speed      = 500,
+    infJump    = true,
     noclip     = false,
-    esp        = false,
+    esp        = true,
     espDist    = true,
     maxEspDist = 500,
 }
@@ -109,138 +108,29 @@ local function stealNearest()
     end
 end
 
--- ── bypass stack ──────────────────────────────────────────────────────────────
--- layer 1: hook WalkSpeed property so server resets write to our value silently
-local _speedLock = false
-local function lockSpeed(hum, spd)
-    if not hum then return end
-    pcall(function()
-        -- metatable hook: intercept __newindex on hum to trap WalkSpeed resets
-        local mt = getrawmetatable and getrawmetatable(hum)
-        if mt then
-            local old_ni = rawget(mt,"__newindex")
-            setreadonly = setreadonly or function() end
-            pcall(setreadonly, mt, false)
-            rawset(mt,"__newindex",function(self,k,v)
-                if k=="WalkSpeed" and _speedLock then
-                    rawset(self,k,spd) return
-                end
-                if old_ni then old_ni(self,k,v) else rawset(self,k,v) end
-            end)
-            pcall(setreadonly, mt, true)
-        end
-    end)
-end
-
--- layer 2: BodyVelocity with randomised names (avoid "__BV" string detection)
-local BV_NAME = "A"..tostring(math.random(100000,999999))
+-- ── speed / bv ────────────────────────────────────────────────────────────────
 local bvConn
 local function stopBV()
     if bvConn then bvConn:Disconnect() bvConn=nil end
-    local r=getRoot(char)
-    if r then
-        local b=r:FindFirstChild(BV_NAME)
-        if b then b:Destroy() end
-    end
-    _speedLock=false
+    local r=getRoot(char) if r then local b=r:FindFirstChild("__BV") if b then b:Destroy() end end
 end
 local function startBV()
-    stopBV()
-    if CFG.speed<=50 then return end
+    stopBV() if CFG.speed<=50 then return end
     local r=getRoot(char) if not r then return end
-    BV_NAME="A"..tostring(math.random(100000,999999))  -- new name each start
     local bv=Instance.new("BodyVelocity")
-    bv.Name=BV_NAME
-    bv.MaxForce=Vector3.new(1e5,0,1e5)
-    bv.Velocity=Vector3.zero
-    bv.P=1e4
-    bv.Parent=r
-    _speedLock=true
+    bv.Name="__BV" bv.MaxForce=Vector3.new(1e5,0,1e5) bv.Velocity=Vector3.zero bv.P=1e4 bv.Parent=r
     bvConn=RunService.RenderStepped:Connect(function()
         local rr=getRoot(char) if not rr then stopBV() return end
-        local b=rr:FindFirstChild(BV_NAME) if not b then return end
+        local b=rr:FindFirstChild("__BV") if not b then return end
         local h=getHum(char)
-        b.Velocity=(h and h.MoveDirection~=Vector3.zero)
-            and h.MoveDirection*CFG.speed
-            or Vector3.zero
+        b.Velocity=(h and h.MoveDirection~=Vector3.zero) and h.MoveDirection*CFG.speed or Vector3.zero
     end)
 end
-
--- layer 3: anti-kick — hook game:GetService("Players").LocalPlayer.Kick
--- and server-kick RemoteEvent/Function spoof
-local function hookKick()
-    pcall(function()
-        local mt=getrawmetatable and getrawmetatable(game)
-        if not mt then return end
-        pcall(setreadonly,mt,false)
-        local old_ni=rawget(mt,"__namecall")
-        rawset(mt,"__namecall",function(self,...)
-            local method=getnamecallmethod and getnamecallmethod() or ""
-            -- block Kick calls directed at localplayer
-            if method=="Kick" and self==lp then return end
-            -- block FireServer on known anti-cheat remotes
-            if (method=="FireServer" or method=="InvokeServer") then
-                local name=tostring(self.Name):lower()
-                if name:find("anticheat") or name:find("ac") or
-                   name:find("report") or name:find("flag") or
-                   name:find("ban") or name:find("kick") then
-                    return  -- drop silently
-                end
-            end
-            return old_ni(self,...)
-        end)
-        pcall(setreadonly,mt,true)
-    end)
-end
-
--- layer 4: humanoid WalkSpeed mask
--- game checks hum.WalkSpeed server-side via replication
--- keep WalkSpeed at 16 in the humanoid (server sees normal)
--- actual movement via BodyVelocity (client-side, not replicated to AC)
 local function applyMods()
     local h=getHum(char) if not h then return end
-    -- keep replicated WalkSpeed at 16 so server AC sees nothing
-    h.WalkSpeed=16
-    if CFG.infJump then h.JumpPower=100 end  -- mild, less flaggable than 150
-    lockSpeed(h, 16)
-    if CFG.speed>50 then
-        startBV()   -- real speed via BV, invisible to server WalkSpeed check
-    else
-        stopBV()
-        _speedLock=false
-        h.WalkSpeed=CFG.speed
-    end
-end
-
--- layer 5: anti-cheat remote watcher — mute any RemoteEvent that fires on us
-local function watchRemotes()
-    pcall(function()
-        for _,v in ipairs(workspace:GetDescendants()) do
-            if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
-                local n=v.Name:lower()
-                if n:find("kick") or n:find("ban") or n:find("flag") or
-                   n:find("cheat") or n:find("report") then
-                    pcall(function()
-                        v.OnClientEvent:Connect(function() end) -- swallow
-                    end)
-                end
-            end
-        end
-    end)
-end
-
--- layer 6: randomise executor fingerprint env vars every 30s
-local function scrubEnv()
-    task.spawn(function()
-        while task.wait(30) do
-            pcall(function()
-                -- rotate the BodyVelocity name so scanner can't pattern-match it
-                if CFG.speed>50 and getRoot(char) then
-                    startBV()
-                end
-            end)
-        end
-    end)
+    h.WalkSpeed=CFG.speed
+    if CFG.infJump then h.JumpPower=150 end
+    if CFG.speed>50 then startBV() else stopBV() end
 end
 
 -- ── noclip ────────────────────────────────────────────────────────────────────
@@ -442,19 +332,19 @@ local function makeGUI()
 
     -- ── build sections ────────────────────────────────────────────────────────
     secLabel("  COMBAT")
-    makeToggle("Auto Steal",  "auto-collect nearest egg", false,
+    makeToggle("Auto Steal",  "auto-collect nearest egg", CFG.autoSteal,
         function(v) CFG.autoSteal=v end)
 
     secLabel("  MOVEMENT")
-    makeToggle("Max Speed",   "BodyVelocity 500 studs/s", false,
+    makeToggle("Max Speed",   "BodyVelocity 500 studs/s", CFG.speed>16,
         function(v) CFG.speed=v and 500 or 16; applyMods() end)
-    makeToggle("Inf Jump",    "JumpPower 100", false,
+    makeToggle("Inf Jump",    "JumpPower 150", CFG.infJump,
         function(v) CFG.infJump=v; applyMods() end)
-    makeToggle("Noclip",      "no collision every Stepped", false,
+    makeToggle("Noclip",      "no collision every Stepped", CFG.noclip,
         function(v) CFG.noclip=v; setNoclip(v) end)
 
     secLabel("  VISUALS")
-    makeToggle("ESP",         "egg labels + distance", false,
+    makeToggle("ESP",         "egg labels + distance", CFG.esp,
         function(v) CFG.esp=v; updateESP() end)
 
     -- ── minimize logic ────────────────────────────────────────────────────────
@@ -468,4 +358,24 @@ local function makeGUI()
     end)
 end
 
--- ── main loops ────────
+-- ── main loops ────────────────────────────────────────────────────────────────
+task.spawn(function()
+    while task.wait(0.2) do if CFG.autoSteal then safeCall(stealNearest) end end
+end)
+task.spawn(function()
+    while task.wait(2) do safeCall(updateESP) end
+end)
+RunService.RenderStepped:Connect(function() safeCall(tickESP) end)
+
+local function onChar(c)
+    char=c stopBV() task.wait(0.5) applyMods()
+    if CFG.noclip then setNoclip(true) end
+end
+lp.CharacterAdded:Connect(onChar)
+if char then onChar(char) end
+
+-- ── init ──────────────────────────────────────────────────────────────────────
+makeGUI()
+updateESP()
+applyMods()
+print("[zynn] steal an egg loaded")
